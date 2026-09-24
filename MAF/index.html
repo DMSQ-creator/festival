@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="theme-color" content="#070b24" />
 <title>中秋快乐 · 花好月圆</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1030'/%3E%3Ccircle cx='32' cy='34' r='17' fill='%23ffe9b0'/%3E%3Ccircle cx='26' cy='30' r='3.4' fill='%23e8b96a' opacity='.55'/%3E%3Ccircle cx='37' cy='39' r='2.6' fill='%23e8b96a' opacity='.5'/%3E%3Ccircle cx='38' cy='27' r='1.8' fill='%23e8b96a' opacity='.45'/%3E%3Cg fill='%23925c24' opacity='.6'%3E%3Cellipse cx='29' cy='40' rx='4.5' ry='3.4'/%3E%3Ccircle cx='34' cy='36' r='2.5'/%3E%3Cellipse cx='32.5' cy='30.5' rx='1.1' ry='3.2'/%3E%3Cellipse cx='35.5' cy='30.5' rx='1.1' ry='3.2'/%3E%3C/g%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
@@ -389,46 +390,154 @@
     }, 800);
   }, 7000);
 
-  /* ---------- 背景音乐（Web Audio 合成） ---------- */
-  var actx = null, musicOn = false, noteTimer = null, ni = 0;
-  var BEAT = 520;
-  var seq = [
-    [659.26,1],[587.33,1],[523.25,1],[440.00,1.5],
-    [523.25,1],[587.33,1],[659.26,1.5],[783.99,2],
-    [659.26,1],[587.33,1],[523.25,1],[587.33,1.5],
-    [440.00,2.5],[0,1]
+  /* ---------- 背景音乐：古筝拨弦质感 + 大厅混响 + 低音铺底 ---------- */
+  var actx = null, musicOn = false, loopTimer = null;
+  var noteBus = null, gate = null;
+  var pluckCache = {};
+  var BEAT = 460; // 每拍毫秒
+
+  // D 宫五声音阶，原创四句旋律
+  var phrases = [
+    { bass:146.83, notes:[[440.00,1],[493.88,1],[587.33,1.5],[493.88,0.5],[440.00,1],[369.99,0.5],[329.63,0.5],[293.66,2],[0,1]] },
+    { bass:98.00,  notes:[[329.63,1],[369.99,1],[440.00,1.5],[369.99,0.5],[329.63,1],[293.66,1],[329.63,2],[0,1]] },
+    { bass:123.47, notes:[[587.33,1],[659.26,1],[739.99,1.5],[659.26,0.5],[587.33,1],[493.88,1],[587.33,2],[0,1]] },
+    { bass:110.00, notes:[[493.88,1],[440.00,1],[369.99,1.5],[329.63,0.5],[293.66,1],[329.63,0.5],[293.66,3],[0,1.5]] }
   ];
-  function tone(freq, beats){
-    if(freq <= 0 || !actx) return;
-    var dur = beats*BEAT;
-    var t = actx.currentTime;
-    var o1 = actx.createOscillator(), o2 = actx.createOscillator();
-    var g = actx.createGain(), g2 = actx.createGain();
-    o1.type = 'sine'; o1.frequency.value = freq;
-    o2.type = 'triangle'; o2.frequency.value = freq; o2.detune.value = 5;
-    g2.gain.value = 0.35;
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(0.14, t+0.07);
-    g.gain.exponentialRampToValueAtTime(0.0001, t+dur/1000);
-    o1.connect(g); o2.connect(g2); g2.connect(g); g.connect(actx.destination);
-    o1.start(t); o2.start(t);
-    o1.stop(t+dur/1000+0.15); o2.stop(t+dur/1000+0.15);
+
+  // 生成混响脉冲（衰减噪声）
+  function makeImpulse(dur, decay){
+    var sr = actx.sampleRate, len = Math.floor(sr*dur);
+    var buf = actx.createBuffer(2, len, sr);
+    for(var ch=0; ch<2; ch++){
+      var d = buf.getChannelData(ch);
+      for(var i=0;i<len;i++){
+        d[i] = (Math.random()*2-1) * Math.pow(1-i/len, decay);
+      }
+    }
+    return buf;
   }
-  function step(){
+
+  // Karplus-Strong 拨弦合成，按音高缓存
+  function getPluck(freq){
+    var key = Math.round(freq);
+    if(pluckCache[key]) return pluckCache[key];
+    var sr = actx.sampleRate, dur = 3.0, len = Math.floor(sr*dur);
+    var buf = actx.createBuffer(1, len, sr);
+    var d = buf.getChannelData(0);
+    var N = Math.max(2, Math.round(sr/freq));
+    var line = new Float32Array(N);
+    for(var i=0;i<N;i++) line[i] = (Math.random()*2-1)*(1-0.25*i/N);
+    var damp = 0.9965, idx = 0, n;
+    for(n=0;n<len;n++){
+      var cur = line[idx];
+      var nxt = line[(idx+1)%N];
+      line[idx] = damp*0.5*(cur+nxt);
+      d[n] = cur;
+      idx = (idx+1)%N;
+    }
+    for(var k=0;k<48;k++){ var w=k/48; d[k]*=w; d[len-1-k]*=w; }
+    pluckCache[key] = buf;
+    return buf;
+  }
+
+  function ensureAudio(){
+    if(actx) return;
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    var comp = actx.createDynamicsCompressor();
+    comp.threshold.value = -18; comp.ratio.value = 3; comp.attack.value = 0.01;
+    comp.connect(actx.destination);
+
+    noteBus = actx.createGain();
+    gate = actx.createGain(); gate.gain.value = 1;
+    var dry = actx.createGain(); dry.gain.value = 1;
+    var verb = actx.createConvolver(); verb.buffer = makeImpulse(2.6, 2.6);
+    var wet = actx.createGain(); wet.gain.value = 0.38;
+    noteBus.connect(gate); gate.connect(dry); dry.connect(comp);
+    gate.connect(verb); verb.connect(wet); wet.connect(comp);
+
+    // 预生成全部拨弦音色（含高八度泛音层）
+    var seen = {};
+    phrases.forEach(function(ph){
+      ph.notes.forEach(function(nt){
+        if(nt[0] > 0 && !seen[nt[0]]){ seen[nt[0]] = 1; getPluck(nt[0]); getPluck(nt[0]*2); }
+      });
+    });
+  }
+
+  function pluck(freq, vel, when){
+    var src = actx.createBufferSource();
+    src.buffer = getPluck(freq);
+    var g = actx.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(0.42*vel, when+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, when+2.9);
+    src.connect(g);
+    if(actx.createStereoPanner){
+      var pan = actx.createStereoPanner();
+      pan.pan.value = (Math.random()*2-1)*0.22;
+      g.connect(pan); pan.connect(noteBus);
+    } else {
+      g.connect(noteBus);
+    }
+    src.start(when); src.stop(when+3.1);
+  }
+
+  function bassNote(freq, dur, when){
+    var o = actx.createOscillator(); o.type = 'sine'; o.frequency.value = freq;
+    var o2 = actx.createOscillator(); o2.type = 'triangle'; o2.frequency.value = freq;
+    var g2 = actx.createGain(); g2.gain.value = 0.22;
+    var g = actx.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(0.15, when+0.7);
+    g.gain.setValueAtTime(0.15, when+Math.max(0.7, dur-0.9));
+    g.gain.linearRampToValueAtTime(0.0001, when+dur);
+    o.connect(g); o2.connect(g2); g2.connect(g); g.connect(noteBus);
+    o.start(when); o2.start(when); o.stop(when+dur+0.1); o2.stop(when+dur+0.1);
+  }
+
+  function schedulePhrase(ph, shimmer, when){
+    var t = when, beats = 0, i;
+    for(i=0;i<ph.notes.length;i++) beats += ph.notes[i][1];
+    bassNote(ph.bass, beats*BEAT/1000 + 1.4, t);
+    for(i=0;i<ph.notes.length;i++){
+      var f = ph.notes[i][0], b = ph.notes[i][1];
+      if(f > 0){
+        var vel = 0.72 + Math.random()*0.28; // 力度人性化
+        pluck(f, vel, t);
+        if(shimmer && b >= 1) pluck(f*2, vel*0.18, t+0.012); // 高八度泛音
+      }
+      t += b*BEAT/1000*(0.985 + Math.random()*0.03); // 时值微抖动
+    }
+    return t;
+  }
+
+  function musicLoop(){
     if(!musicOn) return;
-    var n = seq[ni % seq.length];
-    tone(n[0], n[1]);
-    ni++;
-    noteTimer = setTimeout(step, n[1]*BEAT + 140);
+    var t = actx.currentTime + 0.1;
+    for(var i=0;i<phrases.length;i++) t = schedulePhrase(phrases[i], i===2, t);
+    loopTimer = setTimeout(musicLoop, (t-actx.currentTime)*1000 + 2000);
   }
+
   var btnMusic = document.getElementById('btn-music');
   btnMusic.addEventListener('click', function(){
     try{
-      if(!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      ensureAudio();
       if(actx.state === 'suspended') actx.resume();
       musicOn = !musicOn;
-      if(musicOn){ ni = 0; step(); btnMusic.textContent = '🎵 音乐：开'; showToast('月下清音 · 祝君安康 🎵'); }
-      else { if(noteTimer) clearTimeout(noteTimer); btnMusic.textContent = '🎵 音乐：关'; }
+      if(musicOn){
+        gate.gain.setValueAtTime(1, actx.currentTime);
+        musicLoop();
+        btnMusic.textContent = '🎵 音乐：开';
+        showToast('月下清音 · 祝君安康 🎵');
+      } else {
+        if(loopTimer) clearTimeout(loopTimer);
+        // 快速淡出，避免已排期的音符戛然而止
+        var now = actx.currentTime;
+        gate.gain.cancelScheduledValues(now);
+        gate.gain.setValueAtTime(gate.gain.value, now);
+        gate.gain.linearRampToValueAtTime(0.0001, now+0.4);
+        btnMusic.textContent = '🎵 音乐：关';
+      }
     }catch(err){ showToast('当前设备暂不支持播放'); }
   });
 })();
